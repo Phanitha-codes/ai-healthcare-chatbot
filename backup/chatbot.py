@@ -4,27 +4,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-def get_api_key():
-    """Get API key from Streamlit secrets (cloud) or .env (local)."""
-    try:
-        import streamlit as st
-        if "GROQ_API_KEY" in st.secrets:
-            return st.secrets["GROQ_API_KEY"]
-    except Exception:
-        pass
-    return os.getenv("GROQ_API_KEY")
-
-
-api_key = get_api_key()
-if not api_key:
-    raise ValueError(
-        "GROQ_API_KEY not found. Set it in a .env file locally, "
-        "or in Streamlit Cloud's Secrets settings."
-    )
-
-client = Groq(api_key=api_key)
-
+# ------------------------------------------------------------------
+# SYSTEM PROMPT — this is the main guardrail. It defines the bot's
+# scope, tone, and what it should do when asked off-topic questions.
+# ------------------------------------------------------------------
 SYSTEM_PROMPT = """You are a Healthcare Assistant chatbot. Your ONLY purpose is to
 answer questions related to healthcare, medicine, wellness, symptoms,
 treatments, medications, nutrition, mental health, fitness, and general
@@ -45,6 +30,17 @@ Rules you must always follow:
 5. Keep answers clear, simple, and easy to understand for a general audience.
 """
 
+conversation_history = [
+    {"role": "system", "content": SYSTEM_PROMPT}
+]
+
+# ------------------------------------------------------------------
+# KEYWORD-BASED PRE-FILTER (second guardrail layer)
+# This catches obviously off-topic messages before calling the API,
+# saving cost/latency and giving instant, consistent refusals.
+# Note: this is a simple heuristic, not perfect — the system prompt
+# above is the main line of defense.
+# ------------------------------------------------------------------
 HEALTHCARE_KEYWORDS = [
     "health", "doctor", "medicine", "medical", "symptom", "disease",
     "treatment", "therapy", "hospital", "nurse", "diagnosis", "pain",
@@ -64,30 +60,34 @@ OFF_TOPIC_REPLY = (
 
 
 def is_healthcare_related(message: str) -> bool:
+    """Quick check: does the message contain any healthcare-related keyword?"""
     message_lower = message.lower()
     return any(keyword in message_lower for keyword in HEALTHCARE_KEYWORDS)
 
 
-def get_bot_response(user_message: str, chat_history: list) -> str:
+def get_bot_response(user_message: str) -> str:
     """
-    Takes the user's message and the existing chat history (list of
-    {"role": ..., "content": ...} dicts, managed by Streamlit's session
-    state), and returns the bot's reply as a string.
+    Takes the user's message, checks if it's healthcare-related,
+    and only then sends it to the Groq API along with conversation
+    history. Off-topic messages get an instant canned reply.
     """
+    # Guardrail 1: quick keyword filter (fast, no API cost)
     if not is_healthcare_related(user_message):
         return OFF_TOPIC_REPLY
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + chat_history
-    messages.append({"role": "user", "content": user_message})
+    conversation_history.append({"role": "user", "content": user_message})
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
+            model="llama-3.3-70b-versatile",  # change to whichever Groq model you used
+            messages=conversation_history,
             temperature=0.5,
             max_tokens=1024,
         )
-        return response.choices[0].message.content
+        bot_reply = response.choices[0].message.content
+
+        conversation_history.append({"role": "assistant", "content": bot_reply})
+        return bot_reply
 
     except Exception as e:
         return f"Sorry, something went wrong: {str(e)}"
